@@ -8,10 +8,13 @@ class Config(object):
 
     IMAGE_MIN_SIDE: float = 600.0
     IMAGE_MAX_SIDE: float = 1000.0
+    # IMAGE_MIN_SIDE: float = 300.0
+    # IMAGE_MAX_SIDE: float = 500.0
 
     ANCHOR_RATIOS: List[Tuple[int, int]] = [(1, 2), (1, 1), (2, 1)]
+    # ANCHOR_SIZES: List[int] = [64, 128, 256]
     ANCHOR_SIZES: List[int] = [128, 256, 512]
-    POOLER_MODE: Pooler.Mode = Pooler.Mode.ALIGN
+    POOLER_MODE: Pooler.Mode = Pooler.Mode.POOLING
 
     @classmethod
     def describe(cls):

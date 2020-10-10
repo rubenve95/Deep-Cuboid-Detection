@@ -1,11 +1,11 @@
 from enum import Enum
 
+import math
 import torch
 from torch import Tensor
 from torch.nn import functional as F
 
 from support.layer.roi_align import ROIAlign
-
 
 class Pooler(object):
 

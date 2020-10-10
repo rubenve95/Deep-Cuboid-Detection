@@ -76,22 +76,25 @@ class RegionProposalNetwork(nn.Module):
             selected_indices = selected_indices[torch.randperm(len(selected_indices))].unbind(dim=1)
 
             inside_anchor_bboxes = inside_anchor_bboxes[selected_indices]
+
             gt_bboxes = gt_bboxes_batch[selected_indices[0], anchor_assignments[selected_indices]]
-            gt_anchor_objectnesses = labels[selected_indices]
             gt_anchor_transformers = BBox.calc_transformer(inside_anchor_bboxes, gt_bboxes)
+
             batch_indices = selected_indices[0]
+            gt_anchor_objectnesses = labels[selected_indices]
 
             anchor_objectness_losses, anchor_transformer_losses = self.loss(inside_anchor_objectnesses[selected_indices],
                                                                             inside_anchor_transformers[selected_indices],
                                                                             gt_anchor_objectnesses,
-                                                                            gt_anchor_transformers,
-                                                                            batch_size, batch_indices)
+                                                                            batch_size, batch_indices,
+                                                                            gt_anchor_transformers)
+
 
             return anchor_objectnesses, anchor_transformers, anchor_objectness_losses, anchor_transformer_losses
 
     def loss(self, anchor_objectnesses: Tensor, anchor_transformers: Tensor,
-             gt_anchor_objectnesses: Tensor, gt_anchor_transformers: Tensor,
-             batch_size: int, batch_indices: Tensor) -> Tuple[Tensor, Tensor]:
+             gt_anchor_objectnesses: Tensor, batch_size: int, batch_indices: Tensor, 
+             gt_anchor_transformers: Optional[Tensor]=None) -> Tuple[Tensor, Tensor]:
         cross_entropies = torch.empty(batch_size, dtype=torch.float, device=anchor_objectnesses.device)
         smooth_l1_losses = torch.empty(batch_size, dtype=torch.float, device=anchor_transformers.device)
 
@@ -103,8 +106,8 @@ class RegionProposalNetwork(nn.Module):
 
             fg_indices = gt_anchor_objectnesses[selected_indices].nonzero().view(-1)
             smooth_l1_loss = beta_smooth_l1_loss(input=anchor_transformers[selected_indices][fg_indices],
-                                                 target=gt_anchor_transformers[selected_indices][fg_indices],
-                                                 beta=self._anchor_smooth_l1_loss_beta)
+                                                     target=gt_anchor_transformers[selected_indices][fg_indices],
+                                                     beta=self._anchor_smooth_l1_loss_beta)
 
             cross_entropies[batch_index] = cross_entropy
             smooth_l1_losses[batch_index] = smooth_l1_loss

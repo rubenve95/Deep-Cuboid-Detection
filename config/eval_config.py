@@ -5,8 +5,14 @@ from config.config import Config
 
 class EvalConfig(Config):
 
+    # RPN_PRE_NMS_TOP_N: int = 6000
+    # RPN_POST_NMS_TOP_N: int = 300
+
+    # RPN_PRE_NMS_TOP_N: int = 12000
+    # RPN_POST_NMS_TOP_N: int = 2000
+
     RPN_PRE_NMS_TOP_N: int = 6000
-    RPN_POST_NMS_TOP_N: int = 300
+    RPN_POST_NMS_TOP_N: int = 1000
 
     @classmethod
     def setup(cls, image_min_side: float = None, image_max_side: float = None,

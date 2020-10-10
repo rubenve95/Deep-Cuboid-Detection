@@ -18,7 +18,13 @@ from extension.lr_scheduler import WarmUpMultiStepLR
 from logger import Logger as Log
 from model import Model
 from roi.pooler import Pooler
+from evaluator import Evaluator
 
+def val(model, dataset_name, path_to_data_dir, device):
+    dataset = DatasetBase.from_name(dataset_name)(path_to_data_dir, DatasetBase.Mode.EVAL, Config.IMAGE_MIN_SIDE, Config.IMAGE_MAX_SIDE)
+    evaluator = Evaluator(dataset, path_to_data_dir)
+    mean_ap, detail = evaluator.evaluate_pck(model.module, device)
+    print('VALIDATION', detail, mean_ap)
 
 def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to_checkpoints_dir: str, path_to_resuming_checkpoint: Optional[str]):
     dataset = DatasetBase.from_name(dataset_name)(path_to_data_dir, DatasetBase.Mode.TRAIN, Config.IMAGE_MIN_SIDE, Config.IMAGE_MAX_SIDE)
@@ -28,6 +34,8 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
 
     Log.i('Found {:d} samples'.format(len(dataset)))
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     backbone = BackboneBase.from_name(backbone_name)(pretrained=True)
     model = nn.DataParallel(
         Model(
@@ -35,7 +43,7 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
             anchor_ratios=Config.ANCHOR_RATIOS, anchor_sizes=Config.ANCHOR_SIZES,
             rpn_pre_nms_top_n=Config.RPN_PRE_NMS_TOP_N, rpn_post_nms_top_n=Config.RPN_POST_NMS_TOP_N,
             anchor_smooth_l1_loss_beta=Config.ANCHOR_SMOOTH_L1_LOSS_BETA, proposal_smooth_l1_loss_beta=Config.PROPOSAL_SMOOTH_L1_LOSS_BETA
-        ).cuda()
+        ).to(device)
     )
     optimizer = optim.SGD(model.parameters(), lr=Config.LEARNING_RATE,
                           momentum=Config.MOMENTUM, weight_decay=Config.WEIGHT_DECAY)
@@ -44,8 +52,13 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
 
     step = 0
     time_checkpoint = time.time()
-    losses = deque(maxlen=100)
-    summary_writer = SummaryWriter(os.path.join(path_to_checkpoints_dir, 'summaries'))
+    losses = deque(maxlen=1000)
+    all_losses = {'anchor_objectness_loss': deque(maxlen=1000),
+                'anchor_transformer_loss': deque(maxlen=1000),
+                'proposal_class_loss': deque(maxlen=1000),
+                'proposal_transformer_loss': deque(maxlen=1000),
+                'vertex_loss': deque(maxlen=1000)}
+    #summary_writer = SummaryWriter(os.path.join(path_to_checkpoints_dir, 'summaries'))
     should_stop = False
 
     num_steps_to_display = Config.NUM_STEPS_TO_DISPLAY
@@ -56,25 +69,44 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
         step = model.module.load(path_to_resuming_checkpoint, optimizer, scheduler)
         Log.i(f'Model has been restored from file: {path_to_resuming_checkpoint}')
 
-    device_count = torch.cuda.device_count()
-    assert Config.BATCH_SIZE % device_count == 0, 'The batch size is not divisible by the device count'
-    Log.i('Start training with {:d} GPUs ({:d} batches per GPU)'.format(torch.cuda.device_count(),
-                                                                        Config.BATCH_SIZE // torch.cuda.device_count()))
+    # if torch.cuda.is_available():
+    #     device_count = torch.cuda.device_count()
+    #     assert Config.BATCH_SIZE % device_count == 0, 'The batch size is not divisible by the device count'
+    #     Log.i('Start training with {:d} GPUs ({:d} batches per GPU)'.format(torch.cuda.device_count(),
+    #                                                                         Config.BATCH_SIZE // torch.cuda.device_count()))
 
     while not should_stop:
-        for _, (_, image_batch, _, bboxes_batch, labels_batch) in enumerate(dataloader):
+        for _, (_, image_batch, _, bboxes_batch, labels_batch, vertices_batch) in enumerate(dataloader):
             batch_size = image_batch.shape[0]
-            image_batch = image_batch.cuda()
-            bboxes_batch = bboxes_batch.cuda()
-            labels_batch = labels_batch.cuda()
+            image_batch = image_batch.to(device)
+            bboxes_batch = bboxes_batch.to(device)
+            labels_batch = labels_batch.to(device)
+            vertices_batch = vertices_batch.to(device)
 
-            anchor_objectness_losses, anchor_transformer_losses, proposal_class_losses, proposal_transformer_losses = \
-                model.train().forward(image_batch, bboxes_batch, labels_batch)
+            anchor_objectness_losses, anchor_transformer_losses, proposal_class_losses, proposal_transformer_losses, vertex_losses = \
+                model.train().forward(image_batch, bboxes_batch, labels_batch, vertices_batch)
+            loss = 0
             anchor_objectness_loss = anchor_objectness_losses.mean()
+            loss += anchor_objectness_loss
+            all_losses['anchor_objectness_loss'].append(anchor_objectness_loss.item())
             anchor_transformer_loss = anchor_transformer_losses.mean()
-            proposal_class_loss = proposal_class_losses.mean()
-            proposal_transformer_loss = proposal_transformer_losses.mean()
-            loss = anchor_objectness_loss + anchor_transformer_loss + proposal_class_loss + proposal_transformer_loss
+            loss += anchor_transformer_loss
+            all_losses['anchor_transformer_loss'].append(anchor_transformer_loss.item())
+            proposal_class_losses = proposal_class_losses[proposal_class_losses > 0]
+            if proposal_class_losses.nelement() > 0:
+                proposal_class_loss = proposal_class_losses.mean()
+                loss += proposal_class_loss
+                all_losses['proposal_class_loss'].append(proposal_class_loss.item())
+            proposal_transformer_losses = proposal_transformer_losses[proposal_transformer_losses > 0]
+            if proposal_transformer_losses.nelement() > 0:
+                proposal_transformer_loss = proposal_transformer_losses.mean()
+                loss += proposal_transformer_loss
+                all_losses['proposal_transformer_loss'].append(proposal_transformer_loss.item())
+            vertex_losses = vertex_losses[vertex_losses > 0]
+            if vertex_losses.nelement() > 0:
+                vertex_loss = vertex_losses.mean()
+                loss += vertex_loss
+                all_losses['vertex_loss'].append(vertex_loss.item())
 
             optimizer.zero_grad()
             loss.backward()
@@ -82,11 +114,11 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
             scheduler.step()
 
             losses.append(loss.item())
-            summary_writer.add_scalar('train/anchor_objectness_loss', anchor_objectness_loss.item(), step)
-            summary_writer.add_scalar('train/anchor_transformer_loss', anchor_transformer_loss.item(), step)
-            summary_writer.add_scalar('train/proposal_class_loss', proposal_class_loss.item(), step)
-            summary_writer.add_scalar('train/proposal_transformer_loss', proposal_transformer_loss.item(), step)
-            summary_writer.add_scalar('train/loss', loss.item(), step)
+            # summary_writer.add_scalar('train/anchor_objectness_loss', anchor_objectness_loss.item(), step)
+            # summary_writer.add_scalar('train/anchor_transformer_loss', anchor_transformer_loss.item(), step)
+            # summary_writer.add_scalar('train/proposal_class_loss', proposal_class_loss.item(), step)
+            # summary_writer.add_scalar('train/proposal_transformer_loss', proposal_transformer_loss.item(), step)
+            # summary_writer.add_scalar('train/loss', loss.item(), step)
             step += 1
 
             if step == num_steps_to_finish:
@@ -100,11 +132,19 @@ def _train(dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to
                 eta = (num_steps_to_finish - step) / steps_per_sec / 3600
                 avg_loss = sum(losses) / len(losses)
                 lr = scheduler.get_lr()[0]
-                Log.i(f'[Step {step}] Avg. Loss = {avg_loss:.6f}, Learning Rate = {lr:.8f} ({samples_per_sec:.2f} samples/sec; ETA {eta:.1f} hrs)')
+                avg_vertex_loss = sum(all_losses['vertex_loss'])/len(all_losses['vertex_loss'])
+                Log.i(f'[Step {step}] Avg. Loss = {avg_loss:.6f}, Vertex Loss = {avg_vertex_loss:.6f}, Learning Rate = {lr:.8f} ({samples_per_sec:.2f} samples/sec; ETA {eta:.1f} hrs)')
+                print(sum(all_losses['anchor_objectness_loss'])/len(all_losses['anchor_objectness_loss']), 
+                    sum(all_losses['anchor_transformer_loss'])/len(all_losses['anchor_transformer_loss']), 
+                    sum(all_losses['proposal_class_loss'])/len(all_losses['proposal_class_loss']), 
+                    sum(all_losses['proposal_transformer_loss'])/len(all_losses['proposal_transformer_loss']),
+                    sum(all_losses['vertex_loss'])/len(all_losses['vertex_loss']))
 
             if step % num_steps_to_snapshot == 0 or should_stop:
                 path_to_checkpoint = model.module.save(path_to_checkpoints_dir, step, optimizer, scheduler)
                 Log.i(f'Model has been saved to {path_to_checkpoint}')
+
+                val(model, dataset_name, path_to_data_dir, device)
 
             if should_stop:
                 break

@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+import torch
 
 import uuid
 
@@ -15,22 +16,26 @@ from roi.pooler import Pooler
 
 def _eval(path_to_checkpoint: str, dataset_name: str, backbone_name: str, path_to_data_dir: str, path_to_results_dir: str):
     dataset = DatasetBase.from_name(dataset_name)(path_to_data_dir, DatasetBase.Mode.EVAL, Config.IMAGE_MIN_SIDE, Config.IMAGE_MAX_SIDE)
-    evaluator = Evaluator(dataset, path_to_data_dir, path_to_results_dir)
+    evaluator = Evaluator(dataset, path_to_data_dir)
 
     Log.i('Found {:d} samples'.format(len(dataset)))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     backbone = BackboneBase.from_name(backbone_name)(pretrained=False)
     model = Model(backbone, dataset.num_classes(), pooler_mode=Config.POOLER_MODE,
                   anchor_ratios=Config.ANCHOR_RATIOS, anchor_sizes=Config.ANCHOR_SIZES,
-                  rpn_pre_nms_top_n=Config.RPN_PRE_NMS_TOP_N, rpn_post_nms_top_n=Config.RPN_POST_NMS_TOP_N).cuda()
+                  rpn_pre_nms_top_n=Config.RPN_PRE_NMS_TOP_N, rpn_post_nms_top_n=Config.RPN_POST_NMS_TOP_N).to(device)
     model.load(path_to_checkpoint)
 
     Log.i('Start evaluating with 1 GPU (1 batch per GPU)')
-    mean_ap, detail = evaluator.evaluate(model)
-    Log.i('Done')
+    mean_ap, detail = evaluator.evaluate_pck(model, device)
+    Log.i('{} = {:.4f}'.format(detail, mean_ap))
+    mean_ap, detail = evaluator.evaluate(model, device)
+    Log.i('{} = {:.4f}'.format(detail, mean_ap))
+    # Log.i('Done')
 
-    Log.i('mean AP = {:.4f}'.format(mean_ap))
-    Log.i('\n' + detail)
+    #Log.i('\n' + detail)
 
 
 if __name__ == '__main__':

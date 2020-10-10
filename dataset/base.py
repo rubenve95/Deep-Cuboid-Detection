@@ -17,13 +17,19 @@ class Base(torch.utils.data.dataset.Dataset):
         TRAIN = 'train'
         EVAL = 'eval'
 
-    OPTIONS = ['voc2007', 'coco2017', 'voc2007-cat-dog', 'coco2017-person', 'coco2017-car', 'coco2017-animal']
+    OPTIONS = ['voc2007', 'coco2017', 'voc2007-cat-dog', 'coco2017-person', 'coco2017-car', 'coco2017-animal', 'sunprimitive', 'container']
 
     @staticmethod
     def from_name(name: str) -> Type['Base']:
         if name == 'voc2007':
             from dataset.voc2007 import VOC2007
             return VOC2007
+        elif name == 'sunprimitive':
+            from dataset.sunprimitive import SunPrimitive
+            return SunPrimitive
+        elif name == 'container':
+            from dataset.container import Container
+            return Container            
         elif name == 'coco2017':
             from dataset.coco2017 import COCO2017
             return COCO2017
@@ -54,7 +60,7 @@ class Base(torch.utils.data.dataset.Dataset):
     def __getitem__(self, index: int) -> Tuple[str, Tensor, Tensor, Tensor, Tensor]:
         raise NotImplementedError
 
-    def evaluate(self, path_to_results_dir: str, image_ids: List[str], bboxes: List[List[float]], classes: List[int], probs: List[float]) -> Tuple[float, str]:
+    def evaluate(self, all_image_ids, all_detection_bboxes, all_detection_vertices) -> Tuple[float, str]:
         raise NotImplementedError
 
     def _write_results(self, path_to_results_dir: str, image_ids: List[str], bboxes: List[List[float]], classes: List[int], probs: List[float]):
@@ -88,37 +94,52 @@ class Base(torch.utils.data.dataset.Dataset):
         return image, scale
 
     @staticmethod
-    def padding_collate_fn(batch: List[Tuple[str, Tensor, Tensor, Tensor, Tensor]]) -> Tuple[List[str], Tensor, Tensor, Tensor, Tensor]:
-        image_id_batch, image_batch, scale_batch, bboxes_batch, labels_batch = zip(*batch)
+    def padding_collate_fn(batch: List[Tuple[str, Tensor, Tensor, Tensor, Tensor, Tensor]]) -> Tuple[List[str], Tensor, Tensor, Tensor, Tensor, Tensor]:
+        image_id_batch, image_batch, scale_batch, bboxes_batch, labels_batch, vertices_batch = zip(*batch)
 
         max_image_width = max([it.shape[2] for it in image_batch])
         max_image_height = max([it.shape[1] for it in image_batch])
-        max_bboxes_length = max([len(it) for it in bboxes_batch])
+        max_bboxes_length = max([len(it) if it is not None else 0 for it in bboxes_batch])
+        max_vertices_length = max([len(it) for it in vertices_batch])
         max_labels_length = max([len(it) for it in labels_batch])
 
         padded_image_batch = []
         padded_bboxes_batch = []
         padded_labels_batch = []
+        padded_vertices_batch = []
 
         for image in image_batch:
             padded_image = F.pad(input=image, pad=(0, max_image_width - image.shape[2], 0, max_image_height - image.shape[1]))  # pad has format (left, right, top, bottom)
             padded_image_batch.append(padded_image)
 
         for bboxes in bboxes_batch:
-            padded_bboxes = torch.cat([bboxes, torch.zeros(max_bboxes_length - len(bboxes), 4).to(bboxes)])
-            padded_bboxes_batch.append(padded_bboxes)
+            if bboxes is not None:
+                padded_bboxes = torch.cat([bboxes, torch.zeros(max_bboxes_length - len(bboxes), 4).to(bboxes)])
+                #print(bboxes, padded_bboxes)
+                padded_bboxes_batch.append(padded_bboxes)
+            else:
+                padded_bboxes_batch.append(bboxes)
 
         for labels in labels_batch:
             padded_labels = torch.cat([labels, torch.zeros(max_labels_length - len(labels)).to(labels)])
             padded_labels_batch.append(padded_labels)
+
+        # print(vertices_batch)
+        for vertices in vertices_batch:
+            if vertices is not None:
+                padded_vertices = torch.cat([vertices, torch.zeros(max_vertices_length - len(vertices), 2, 8).to(vertices)])
+                padded_vertices_batch.append(padded_vertices)
+            else:
+                padded_vertices_batch.append(vertices)
 
         image_id_batch = list(image_id_batch)
         padded_image_batch = torch.stack(padded_image_batch, dim=0)
         scale_batch = torch.stack(scale_batch, dim=0)
         padded_bboxes_batch = torch.stack(padded_bboxes_batch, dim=0)
         padded_labels_batch = torch.stack(padded_labels_batch, dim=0)
+        padded_vertices_batch = torch.stack(padded_vertices_batch, dim=0)
 
-        return image_id_batch, padded_image_batch, scale_batch, padded_bboxes_batch, padded_labels_batch
+        return image_id_batch, padded_image_batch, scale_batch, padded_bboxes_batch, padded_labels_batch, padded_vertices_batch
 
     class NearestRatioRandomSampler(torch.utils.data.sampler.Sampler):
 

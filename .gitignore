@@ -6,4 +6,14 @@ caches
 support.egg-info
 pycocotools
 
+caches
+data
+env
+images
+outputs
+results
+support.egg-info
+*.jpg
+*.png
+
 *.so
